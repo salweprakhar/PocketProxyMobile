@@ -633,12 +633,13 @@ public final class MainActivity extends Activity {
             } catch (Exception e) {
                 result = "Repeat failed: " + e.getClass().getSimpleName() + ": " + e.getMessage();
             }
+            String responseText = result;
             runOnUiThread(() -> new AlertDialog.Builder(this)
                     .setTitle("Repeater Response")
-                    .setMessage(result)
+                    .setMessage(responseText)
                     .setNeutralButton("Copy", (dialog, which) -> {
                         ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
-                        manager.setPrimaryClip(ClipData.newPlainText("repeater response", result));
+                        manager.setPrimaryClip(ClipData.newPlainText("repeater response", responseText));
                         Toast.makeText(this, "Response copied", Toast.LENGTH_SHORT).show();
                     })
                     .setPositiveButton("Close", null)
