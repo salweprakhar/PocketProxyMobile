@@ -8,10 +8,16 @@ A **local-only, Burp-style educational HTTP proxy** for Android phones. It is an
 - HTTP forwarding, including GET/POST and request bodies (Content-Length and chunked transfer).
 - HTTPS **CONNECT tunnels**, preserving encryption: records destination host only, **never decrypts HTTPS content**.
 - Searchable, tappable traffic history; request/response headers; HTTP response codes and durations.
+- History search covers captured headers and enabled body previews, with method and status filters.
 - Plain HTTP Request Repeater with editable method, URL, headers and body.
+- Repeater displays response headers and a bounded response body, including gzip decoding and charset-aware text display.
+- Side-by-side request/response comparison with line-level differences.
+- Explicitly confirmed, metadata-only test report sharing.
+- Optional manual plain HTTP interception with forward, edit-and-forward, and drop controls.
+- Intercepted requests automatically pass through unchanged after 45 seconds if no action is taken.
 - Captured HTTP request and response body previews in traffic details.
 - Built-in Base64, URL and hex decode/encode tools.
-- Target scope filtering with in-memory host allowlists.
+- Target scope filtering with in-memory host-and-port allowlists. Repeater and Intruder require an explicit scope match.
 - Intruder-style plain HTTP payload runner, capped at 20 requests.
 - Automatically masks common authentication, cookie, and key **header values** in history, and common secrets in URL query parameters.
 - Optional HTTP body-preview capture (OFF by default; this can expose secrets and should only be used for safe test traffic).
@@ -25,7 +31,9 @@ A **local-only, Burp-style educational HTTP proxy** for Android phones. It is an
 - **This does not provide system-wide transparent interception.** Apps must honor the Android Wi-Fi proxy setting (or be explicitly configured to use the proxy). Many apps ignore it.
 - **HTTPS is NOT decrypted.** There is no certificate authority, user CA install, certificate-pinning bypass or TLS man-in-the-middle feature.
 - Android's Wi-Fi proxy setting is per Wi-Fi network. It may not work for cellular apps or all browsers, and some devices reject a loopback proxy host.
-- This is a basic HTTP/1.x forward proxy, not an HTTP/2, HTTP/3, WebSocket inspection, repeater, scanner, HTTP interception editor, or VPN-based proxy. It does not guarantee compatibility with all HTTP servers or long-running connections.
+- Manual interception is limited to bodyless or UTF-8 text requests with Content-Length up to 64 KB. Chunked, larger, binary, and `Expect: 100-continue` requests pass through without pausing.
+- Repeater and Intruder send only plain HTTP to explicitly scoped hosts and ports. A host-only scope entry means port 80; subdomains are included on that port. HTTPS, IPv6 scope entries, and requests outside the selected scope are not sent by those tools.
+- This is a basic HTTP/1.x forward proxy, not an HTTP/2, HTTP/3, WebSocket inspection, scanner, or VPN-based proxy. It does not guarantee compatibility with all HTTP servers or long-running connections.
 - The **manual Wi-Fi proxy must be reset to None** after testing; stopping the app while the system proxy is still enabled can interrupt browsing.
 - Although sensitive headers are masked, URL paths and body previews can still contain secrets. Do not share raw captures. Export only the sanitized summary if needed.
 - Source has been tested for Java compilation and basic proxy forwarding with local JVM stubs; the full Android project must be built and verified on a real Android phone or emulator.
@@ -77,7 +85,8 @@ PocketProxyMobile/
 │       ├── java/com/pocketproxy/lab/
 │       │   ├── MainActivity.java     # Native UI and offline self-test
 │       │   ├── ProxyService.java     # Loopback HTTP proxy and CONNECT tunneling
-│       │   └── TrafficStore.java     # In-memory sanitized capture history
+│       │   ├── TrafficStore.java     # In-memory sanitized capture history
+│       │   └── InterceptStore.java   # In-memory manual intercept queue
 │       └── res/values/styles.xml
 ├── build.gradle
 ├── gradle.properties

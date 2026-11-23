@@ -34,6 +34,7 @@ public final class TrafficStore {
         public volatile String requestBody = "";
         public volatile String responseBody = "";
         public volatile long durationMs = 0;
+        public volatile String forwardedRequest = "";
 
         Entry(String method, String url, String host) {
             this.method = method;
@@ -57,7 +58,10 @@ public final class TrafficStore {
                     + "\n\nRESPONSE BODY"
                     + (responseBody.isEmpty()
                         ? "\n[No response body captured]"
-                        : "\n" + responseBody);
+                        : "\n" + responseBody)
+                    + (forwardedRequest.isEmpty()
+                        ? ""
+                        : "\n\nFORWARDED REQUEST\n" + forwardedRequest);
         }
     }
 

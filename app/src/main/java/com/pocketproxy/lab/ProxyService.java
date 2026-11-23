@@ -187,6 +187,57 @@ public final class ProxyService extends Service {
         return raw.toString();
     }
 
+    private static List<String> parseHeaders(String raw) {
+        List<String> headers = new ArrayList<>();
+        for (String line : raw.split("\\r?\\n")) {
+            if (line.isEmpty()) continue;
+            int colon = line.indexOf(':');
+            if (colon <= 0) throw new IllegalArgumentException("Invalid header line");
+            String name = line.substring(0, colon).trim();
+            if (!name.matches("[!#$%&'*+.^_`|~0-9A-Za-z-]+"))
+                throw new IllegalArgumentException("Invalid header name");
+            for (int i = colon + 1; i < line.length(); i++) {
+                char value = line.charAt(i);
+                if ((value < 0x20 && value != '\t') || value == 0x7f)
+                    throw new IllegalArgumentException("Control character in header value");
+            }
+            headers.add(line);
+        }
+        return headers;
+    }
+
+    private static boolean hasHeader(List<String> headers, String name) {
+        return headerValue(headers, name) != null;
+    }
+
+    private static void replaceHeader(List<String> headers, String name, String value) {
+        boolean replaced = false;
+        for (int i = 0; i < headers.size(); i++) {
+            String header = headers.get(i);
+            int colon = header.indexOf(':');
+            if (colon > 0 && name.equalsIgnoreCase(header.substring(0, colon).trim())) {
+                if (!replaced) {
+                    headers.set(i, name + ": " + value);
+                    replaced = true;
+                } else {
+                    headers.remove(i--);
+                }
+            }
+        }
+        if (!replaced) headers.add(name + ": " + value);
+    }
+
+    private static byte[] readRequestBody(InputStream input, long length) throws IOException {
+        byte[] body = new byte[(int) length];
+        int offset = 0;
+        while (offset < body.length) {
+            int count = input.read(body, offset, body.length - offset);
+            if (count < 0) throw new IOException("Unexpected end of intercepted request body");
+            offset += count;
+        }
+        return body;
+    }
+
     private void localSelfTest(OutputStream output, TrafficStore.Entry entry) throws IOException {
         byte[] body = "PocketProxy Lab self-test succeeded. No internet required.\n"
                 .getBytes(StandardCharsets.UTF_8);
@@ -236,6 +287,79 @@ public final class ProxyService extends Service {
     private void forwardHttp(InputStream input, OutputStream output, String method,
                              URI uri, String host, int port, List<String> headers,
                              TrafficStore.Entry entry) throws Exception {
+        byte[] bufferedRequestBody = null;
+        boolean bodyBuffered = false;
+        String transferEncoding = headerValue(headers, "transfer-encoding");
+        String contentLengthHeader = headerValue(headers, "content-length");
+        long requestLength = 0;
+        boolean hasContentLength = contentLengthHeader != null;
+        if (hasContentLength) {
+            try { requestLength = Long.parseLong(contentLengthHeader.trim()); }
+            catch (NumberFormatException e) { throw new IOException("Invalid Content-Length"); }
+        }
+        boolean canIntercept = InterceptStore.enabled
+                && (transferEncoding == null || !transferEncoding.toLowerCase(Locale.US).contains("chunked"))
+                && headerValue(headers, "expect") == null
+                && requestLength >= 0 && requestLength <= 64 * 1024;
+        if (canIntercept) {
+            bufferedRequestBody = readRequestBody(input, requestLength);
+            bodyBuffered = true;
+            if (TrafficStore.captureBodyPreview && bufferedRequestBody.length > 0) {
+                entry.requestBody = preview(bufferedRequestBody);
+            }
+            String decodedBody = new String(bufferedRequestBody, StandardCharsets.UTF_8);
+            boolean editableBody = java.util.Arrays.equals(bufferedRequestBody,
+                    decodedBody.getBytes(StandardCharsets.UTF_8))
+                    && decodedBody.indexOf('\0') < 0;
+            InterceptStore.PendingRequest pending = editableBody
+                    ? InterceptStore.awaitDecision(method, uri.toString(), joinHeaders(headers), decodedBody)
+                    : null;
+            if (pending != null) {
+                if (pending.dropped) {
+                    sendError(output, 403, "Request dropped by user");
+                    entry.status = "DROPPED";
+                    entry.responseHeaders = "Request was dropped in manual intercept mode";
+                    TrafficStore.changed();
+                    return;
+                }
+                if (!pending.timedOut) {
+                    method = pending.method.trim().toUpperCase(Locale.US);
+                    try {
+                        uri = new URI(pending.url);
+                        if (!method.matches("[A-Z][A-Z0-9-]*")
+                                || !"http".equalsIgnoreCase(uri.getScheme())
+                                || uri.getHost() == null || uri.getHost().isEmpty()
+                                || uri.getPort() == 0 || uri.getPort() > 65535) {
+                            throw new IllegalArgumentException("Invalid method or plain HTTP URL");
+                        }
+                        host = uri.getHost();
+                        port = uri.getPort() > 0 ? uri.getPort() : 80;
+                        headers = parseHeaders(pending.headers);
+                    } catch (Exception e) {
+                        sendError(output, 400, "Invalid intercepted request: " + e.getMessage());
+                        entry.status = "INTERCEPT ERROR";
+                        entry.responseHeaders = e.getMessage();
+                        TrafficStore.changed();
+                        return;
+                    }
+                    headers.removeIf(header -> "transfer-encoding".equals(headerName(header))
+                            || "expect".equals(headerName(header)));
+                    bufferedRequestBody = pending.body.getBytes(StandardCharsets.UTF_8);
+                    if (bufferedRequestBody.length > 64 * 1024) {
+                        sendError(output, 413, "Edited request body exceeds 64 KB");
+                        entry.status = "INTERCEPT ERROR";
+                        entry.responseHeaders = "Edited request body exceeds 64 KB";
+                        TrafficStore.changed();
+                        return;
+                    }
+                    replaceHeader(headers, "host", host + (port != 80 ? ":" + port : ""));
+                    if (hasHeader(headers, "content-length") || bufferedRequestBody.length > 0) {
+                        replaceHeader(headers, "content-length", Integer.toString(bufferedRequestBody.length));
+                    }
+                    entry.forwardedRequest = method + " " + uri;
+                }
+            }
+        }
         try (Socket upstream = new Socket()) {
             upstream.connect(new InetSocketAddress(host, port), 10000);
             upstream.setSoTimeout(60000);
@@ -267,9 +391,14 @@ public final class ProxyService extends Service {
                     output.write("HTTP/1.1 100 Continue\r\n\r\n".getBytes(StandardCharsets.ISO_8859_1));
                     output.flush();
                 }
-                ByteArrayOutputStream requestPreview = TrafficStore.captureBodyPreview
+                ByteArrayOutputStream requestPreview = TrafficStore.captureBodyPreview && !bodyBuffered
                         ? new ByteArrayOutputStream() : null;
-                sendBody(input, upstreamOut, headers, requestPreview, false);
+                if (bodyBuffered) {
+                    upstreamOut.write(bufferedRequestBody);
+                    if (requestPreview != null) requestPreview.write(bufferedRequestBody);
+                } else {
+                    sendBody(input, upstreamOut, headers, requestPreview, false);
+                }
                 upstreamOut.flush();
                 if (requestPreview != null) entry.requestBody = preview(requestPreview);
 
@@ -396,6 +525,12 @@ public final class ProxyService extends Service {
                 + (data.size() == PREVIEW_BYTES ? "\n[preview truncated]" : "");
     }
 
+    private static String preview(byte[] data) {
+        ByteArrayOutputStream preview = new ByteArrayOutputStream();
+        preview.write(data, 0, Math.min(data.length, PREVIEW_BYTES));
+        return preview(preview);
+    }
+
     private static boolean isHopByHop(String name) {
         return "connection".equals(name) || "proxy-connection".equals(name)
                 || "keep-alive".equals(name) || "proxy-authorization".equals(name)
@@ -491,6 +626,7 @@ public final class ProxyService extends Service {
 
     @Override public void onDestroy() {
         active = false;
+        InterceptStore.dropPending();
         TrafficStore.proxyRunning = false;
         TrafficStore.changed();
         try { if (server != null) server.close(); } catch (IOException ignored) {}
