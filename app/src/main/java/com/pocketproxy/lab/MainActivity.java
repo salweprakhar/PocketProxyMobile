@@ -18,6 +18,7 @@ import android.os.Looper;
 import android.provider.Settings;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.util.Base64;
 import android.view.Gravity;
 import android.view.View;
 import android.widget.Button;
@@ -29,12 +30,17 @@ import android.widget.TextView;
 import android.widget.Toast;
 
 import java.io.BufferedReader;
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.net.Socket;
+import java.net.URI;
 import java.nio.charset.StandardCharsets;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Set;
 
 /** Small dependency-free native UI for the local proxy. */
 public final class MainActivity extends Activity {
@@ -54,6 +60,7 @@ public final class MainActivity extends Activity {
     private LinearLayout historyContainer;
     private Button startButton;
     private Button stopButton;
+    private final Set<String> targetScope = new LinkedHashSet<>();
     private final Runnable refresh = new Runnable() {
         @Override public void run() {
             refreshUi(false);
@@ -137,6 +144,11 @@ public final class MainActivity extends Activity {
         wifiParams.leftMargin = dp(10);
         quick.addView(wifi, wifiParams);
         wifi.setOnClickListener(v -> startActivity(new Intent(Settings.ACTION_WIFI_SETTINGS)));
+        Button decoder = actionButton("Decoder", PANEL, FG);
+        LinearLayout.LayoutParams decoderParams = weightedButton();
+        decoderParams.leftMargin = dp(10);
+        quick.addView(decoder, decoderParams);
+        decoder.setOnClickListener(v -> openDecoder());
         space(root, 20);
 
         LinearLayout how = card();
@@ -158,7 +170,12 @@ public final class MainActivity extends Activity {
         root.addView(heading);
         heading.addView(text("HTTP HISTORY", 16, FG, true),
                 new LinearLayout.LayoutParams(0, dp(32), 1f));
+        Button scopeButton = actionButton("Target", PANEL, FG);
+        scopeButton.setLayoutParams(new LinearLayout.LayoutParams(dp(72), dp(32)));
+        scopeButton.setOnClickListener(v -> openTargetScope());
+        heading.addView(scopeButton);
         countText = text("0 entries", 12, MUTED, false);
+        countText.setPadding(dp(8), 0, 0, 0);
         heading.addView(countText);
         space(root, 7);
 
@@ -207,6 +224,11 @@ public final class MainActivity extends Activity {
         Button export = actionButton("Share safe summary", PANEL, FG);
         actions.addView(export, weightedButton());
         export.setOnClickListener(v -> shareSummary());
+        Button intruder = actionButton("Intruder", PANEL, FG);
+        LinearLayout.LayoutParams intruderParams = weightedButton();
+        intruderParams.leftMargin = dp(10);
+        actions.addView(intruder, intruderParams);
+        intruder.setOnClickListener(v -> openIntruder(null));
         Button clear = actionButton("Clear history", PANEL, FG);
         LinearLayout.LayoutParams clearParams = weightedButton();
         clearParams.leftMargin = dp(10);
@@ -251,6 +273,7 @@ public final class MainActivity extends Activity {
             String full = (entry.host + " " + entry.url + " " + entry.method + " " + entry.status)
                     .toLowerCase(Locale.US);
             if (!search.isEmpty() && !full.contains(search)) continue;
+            if (!targetScope.isEmpty() && !targetScope.contains(entry.host)) continue;
             shown++;
             LinearLayout item = card();
             LinearLayout.LayoutParams itemParams = new LinearLayout.LayoutParams(-1, -2);
@@ -274,11 +297,18 @@ public final class MainActivity extends Activity {
             url.setMaxLines(2);
             url.setEllipsize(android.text.TextUtils.TruncateAt.END);
             item.addView(url);
-            item.setOnClickListener(v -> new AlertDialog.Builder(this)
-                    .setTitle("Request " + entry.id)
-                    .setMessage(entry.detail())
-                    .setPositiveButton("Close", null)
-                    .show());
+            item.setOnClickListener(v -> {
+                AlertDialog.Builder builder = new AlertDialog.Builder(this)
+                        .setTitle("Request " + entry.id)
+                        .setMessage(entry.detail())
+                        .setNeutralButton("Intruder", (dialog, which) -> openIntruder(entry))
+                        .setNegativeButton("Close", null);
+                if (!"CONNECT".equalsIgnoreCase(entry.method)
+                        && entry.url.startsWith("http://")) {
+                    builder.setPositiveButton("Repeater", (dialog, which) -> openRepeater(entry));
+                }
+                builder.show();
+            });
         }
         if (shown == 0) {
             TextView empty = text(entries.isEmpty()
@@ -286,6 +316,424 @@ public final class MainActivity extends Activity {
                     : "No entries match your filter.", 13, MUTED, false);
             empty.setPadding(dp(6), dp(15), dp(6), dp(15));
             historyContainer.addView(empty);
+        }
+    }
+
+    private void openRepeater(TrafficStore.Entry entry) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout form = column();
+        form.setPadding(dp(20), dp(10), dp(20), dp(4));
+        scroll.addView(form);
+
+        form.addView(text("Plain HTTP only. Review the target and do not repeat requests to third-party or unauthorized endpoints.",
+                12, MUTED, false));
+        space(form, 10);
+
+        EditText method = field("Method", entry.method);
+        form.addView(method);
+        space(form, 8);
+        EditText url = field("URL", entry.url);
+        form.addView(url);
+        space(form, 8);
+        String repeaterHeaders = entry.rawRequestHeaders.isEmpty()
+                ? entry.requestHeaders : entry.rawRequestHeaders;
+        EditText headers = field("Headers (one per line)", repeaterHeaders);
+        headers.setMinLines(4);
+        form.addView(headers);
+        space(form, 8);
+        EditText body = field("Request body", entry.requestBody);
+        body.setMinLines(3);
+        form.addView(body);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Request Repeater")
+                .setView(scroll)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Send", (dialog, which) ->
+                        repeatRequest(method.getText().toString().trim().toUpperCase(Locale.US),
+                                url.getText().toString().trim(),
+                                headers.getText().toString(),
+                                body.getText().toString()))
+                .show();
+    }
+
+    private void openTargetScope() {
+        StringBuilder message = new StringBuilder();
+        if (targetScope.isEmpty()) {
+            message.append("No target hosts are in scope.\n\nWhen scope is empty, all captured hosts are shown.");
+        } else {
+            message.append("In-scope hosts:\n");
+            for (String host : targetScope) message.append("• ").append(host).append('\n');
+        }
+        EditText hostField = field("Add host (for example, example.com)", "");
+        LinearLayout form = column();
+        form.setPadding(dp(20), dp(10), dp(20), dp(4));
+        form.addView(text(message.toString(), 13, FG, false));
+        space(form, 10);
+        form.addView(hostField);
+        new AlertDialog.Builder(this)
+                .setTitle("Target Scope")
+                .setView(form)
+                .setNegativeButton("Close", null)
+                .setNeutralButton(targetScope.isEmpty() ? null : "Clear scope",
+                        targetScope.isEmpty() ? null : (dialog, which) -> {
+                            targetScope.clear();
+                            refreshUi(true);
+                        })
+                .setPositiveButton("Add host", (dialog, which) -> {
+                    String host = hostField.getText().toString().trim().toLowerCase(Locale.US);
+                    if (host.isEmpty()) return;
+                    targetScope.add(host);
+                    refreshUi(true);
+                    Toast.makeText(this, "Target scope added: " + host, Toast.LENGTH_SHORT).show();
+                })
+                .show();
+    }
+
+    private void openIntruder(TrafficStore.Entry entry) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout form = column();
+        form.setPadding(dp(20), dp(10), dp(20), dp(4));
+        scroll.addView(form);
+        form.addView(text("Use §payload§ in the URL, headers or body. The run is capped at 20 requests.",
+                12, MUTED, false));
+        space(form, 10);
+
+        EditText method = field("Method", entry == null ? "GET" : entry.method);
+        form.addView(method);
+        space(form, 8);
+        EditText url = field("URL template", entry == null ? "http://example.test/§payload§" : entry.url);
+        form.addView(url);
+        space(form, 8);
+        EditText headers = field("Headers (one per line)", entry == null
+                ? "Accept: */*" : entry.rawRequestHeaders);
+        headers.setMinLines(3);
+        form.addView(headers);
+        space(form, 8);
+        EditText body = field("Body template", entry == null ? "" : entry.requestBody);
+        body.setMinLines(2);
+        form.addView(body);
+        space(form, 8);
+        EditText payloads = field("Payloads (one per line)", "test1\ntest2\ntest3");
+        payloads.setMinLines(4);
+        form.addView(payloads);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Intruder")
+                .setView(scroll)
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Run", (dialog, which) -> runIntruder(
+                        method.getText().toString().trim().toUpperCase(Locale.US),
+                        url.getText().toString().trim(),
+                        headers.getText().toString(),
+                        body.getText().toString(),
+                        payloads.getText().toString()))
+                .show();
+    }
+
+    private void runIntruder(String method, String templateUrl, String templateHeaders,
+                             String templateBody, String payloadText) {
+        List<String> payloadList = new java.util.ArrayList<>();
+        for (String payload : payloadText.split("\\r?\\n")) {
+            String value = payload.trim();
+            if (!value.isEmpty()) payloadList.add(value);
+            if (payloadList.size() == 20) break;
+        }
+        if (payloadList.isEmpty()) {
+            Toast.makeText(this, "Add at least one payload", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        Toast.makeText(this, "Running " + payloadList.size() + " payload(s)", Toast.LENGTH_SHORT).show();
+        new Thread(() -> {
+            StringBuilder results = new StringBuilder();
+            results.append("Intruder results (plain HTTP only)\n");
+            for (int i = 0; i < payloadList.size(); i++) {
+                String payload = payloadList.get(i);
+                String url = templateUrl.replace("§payload§", payload);
+                String headers = templateHeaders.replace("§payload§", payload);
+                String body = templateBody.replace("§payload§", payload);
+                try {
+                    URI uri = new URI(url);
+                    if (!"http".equalsIgnoreCase(uri.getScheme()) || uri.getHost() == null) {
+                        results.append(i + 1).append(". FAILED invalid HTTP URL\n");
+                        continue;
+                    }
+                    int port = uri.getPort() > 0 ? uri.getPort() : 80;
+                    byte[] bodyBytes = body.getBytes(StandardCharsets.UTF_8);
+                    String path = uri.getRawPath();
+                    if (path == null || path.isEmpty()) path = "/";
+                    if (uri.getRawQuery() != null) path += "?" + uri.getRawQuery();
+                    StringBuilder request = new StringBuilder();
+                    request.append(method).append(" ").append(path).append(" HTTP/1.1\r\n");
+                    boolean hasHost = false;
+                    boolean hasLength = false;
+                    for (String line : headers.split("\\r?\\n")) {
+                        line = line.trim();
+                        if (line.isEmpty() || line.indexOf(':') <= 0) continue;
+                        int colon = line.indexOf(':');
+                        String name = line.substring(0, colon).trim();
+                        String lower = name.toLowerCase(Locale.US);
+                        if ("host".equals(lower)) hasHost = true;
+                        if ("content-length".equals(lower)) hasLength = true;
+                        if ("connection".equals(lower) || "transfer-encoding".equals(lower)
+                                || "proxy-connection".equals(lower)) continue;
+                        request.append(name).append(": ").append(line.substring(colon + 1).trim()).append("\r\n");
+                    }
+                    if (!hasHost) {
+                        request.append("Host: ").append(uri.getHost());
+                        if (port != 80) request.append(":").append(port);
+                        request.append("\r\n");
+                    }
+                    if (!body.isEmpty() && !hasLength)
+                        request.append("Content-Length: ").append(bodyBytes.length).append("\r\n");
+                    request.append("Connection: close\r\n\r\n");
+
+                    try (Socket socket = new Socket(uri.getHost(), port);
+                         OutputStream out = socket.getOutputStream();
+                         BufferedReader reader = new BufferedReader(new InputStreamReader(
+                                 socket.getInputStream(), StandardCharsets.ISO_8859_1))) {
+                        socket.setSoTimeout(10000);
+                        out.write(request.toString().getBytes(StandardCharsets.ISO_8859_1));
+                        if (!body.isEmpty()) out.write(bodyBytes);
+                        out.flush();
+                        String status = reader.readLine();
+                        results.append(i + 1).append(". ")
+                                .append(payload).append(" → ")
+                                .append(status == null ? "NO RESPONSE" : status)
+                                .append('\n');
+                    }
+                } catch (Exception e) {
+                    results.append(i + 1).append(". ").append(payload)
+                            .append(" → ERROR: ").append(e.getClass().getSimpleName())
+                            .append('\n');
+                }
+            }
+            runOnUiThread(() -> new AlertDialog.Builder(this)
+                    .setTitle("Intruder Results")
+                    .setMessage(results.toString())
+                    .setNegativeButton("Close", null)
+                    .setPositiveButton("Copy", (dialog, which) -> {
+                        ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                        manager.setPrimaryClip(ClipData.newPlainText("intruder results", results.toString()));
+                        Toast.makeText(this, "Results copied", Toast.LENGTH_SHORT).show();
+                    })
+                    .show());
+        }, "PocketProxy-Intruder").start();
+    }
+
+    private EditText field(String hint, String value) {
+        EditText field = new EditText(this);
+        field.setHint(hint);
+        field.setText(value);
+        field.setTextSize(13);
+        field.setTextColor(FG);
+        field.setHintTextColor(MUTED);
+        field.setPadding(dp(12), dp(10), dp(12), dp(10));
+        field.setBackground(rounded(PANEL, 10, 0));
+        return field;
+    }
+
+    private void repeatRequest(String method, String url, String headersText, String bodyText) {
+        if (method.isEmpty()) {
+            Toast.makeText(this, "Method is required", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        new Thread(() -> {
+            String result;
+            try {
+                URI uri = new URI(url);
+                if (!"http".equalsIgnoreCase(uri.getScheme())
+                        || uri.getHost() == null || uri.getHost().isEmpty()) {
+                    throw new IllegalArgumentException("Repeater accepts http:// URLs only");
+                }
+                int port = uri.getPort() > 0 ? uri.getPort() : 80;
+                byte[] body = bodyText.getBytes(StandardCharsets.UTF_8);
+                String path = uri.getRawPath();
+                if (path == null || path.isEmpty()) path = "/";
+                if (uri.getRawQuery() != null) path += "?" + uri.getRawQuery();
+
+                StringBuilder request = new StringBuilder();
+                request.append(method).append(" ").append(path).append(" HTTP/1.1\r\n");
+                boolean hasHost = false;
+                boolean hasContentLength = false;
+                for (String line : headersText.split("\\r?\\n")) {
+                    line = line.trim();
+                    if (line.isEmpty()) continue;
+                    int colon = line.indexOf(':');
+                    if (colon <= 0) continue;
+                    String name = line.substring(0, colon).trim();
+                    String lower = name.toLowerCase(Locale.US);
+                    if ("host".equals(lower)) hasHost = true;
+                    if ("content-length".equals(lower)) hasContentLength = true;
+                    if ("connection".equals(lower) || "proxy-connection".equals(lower)
+                            || "transfer-encoding".equals(lower) || "upgrade".equals(lower)) continue;
+                    request.append(name).append(": ").append(line.substring(colon + 1).trim()).append("\r\n");
+                }
+                if (!hasHost) {
+                    request.append("Host: ").append(uri.getHost());
+                    if (port != 80) request.append(":").append(port);
+                    request.append("\r\n");
+                }
+                if (!bodyText.isEmpty() && !hasContentLength) {
+                    request.append("Content-Length: ").append(body.length).append("\r\n");
+                }
+                request.append("Connection: close\r\n\r\n");
+
+                try (Socket socket = new Socket(uri.getHost(), port);
+                     BufferedOutputStream out = new BufferedOutputStream(socket.getOutputStream());
+                     BufferedInputStream in = new BufferedInputStream(socket.getInputStream())) {
+                    socket.setSoTimeout(15000);
+                    out.write(request.toString().getBytes(StandardCharsets.ISO_8859_1));
+                    if (!bodyText.isEmpty()) out.write(body);
+                    out.flush();
+
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(
+                            in, StandardCharsets.ISO_8859_1));
+                    String status = reader.readLine();
+                    if (status == null) throw new IllegalStateException("No response received");
+                    StringBuilder response = new StringBuilder();
+                    response.append(status).append('\n');
+                    int contentLength = -1;
+                    String line;
+                    while ((line = reader.readLine()) != null && !line.isEmpty()) {
+                        response.append(line).append('\n');
+                        int colon = line.indexOf(':');
+                        if (colon > 0 && "content-length".equalsIgnoreCase(line.substring(0, colon).trim())) {
+                            try {
+                                contentLength = Integer.parseInt(line.substring(colon + 1).trim());
+                            } catch (NumberFormatException ignored) {}
+                        }
+                    }
+                    response.append('\n');
+
+                    if (contentLength >= 0) {
+                        int remaining = Math.min(contentLength, 65536);
+                        char[] buffer = new char[remaining];
+                        int total = 0;
+                        while (total < remaining) {
+                            int read = reader.read(buffer, total, remaining - total);
+                            if (read < 0) break;
+                            total += read;
+                        }
+                        response.append(buffer, 0, total);
+                        if (contentLength > 65536) response.append("\n[body truncated to 64 KB]");
+                    } else {
+                        char[] buffer = new char[4096];
+                        int read;
+                        int total = 0;
+                        while (total < 65536 && (read = reader.read(buffer, 0,
+                                Math.min(buffer.length, 65536 - total))) >= 0) {
+                            response.append(buffer, 0, read);
+                            total += read;
+                        }
+                        if (total == 65536) response.append("\n[body truncated to 64 KB]");
+                    }
+                    result = response.toString();
+                }
+            } catch (Exception e) {
+                result = "Repeat failed: " + e.getClass().getSimpleName() + ": " + e.getMessage();
+            }
+            runOnUiThread(() -> new AlertDialog.Builder(this)
+                    .setTitle("Repeater Response")
+                    .setMessage(result)
+                    .setNeutralButton("Copy", (dialog, which) -> {
+                        ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                        manager.setPrimaryClip(ClipData.newPlainText("repeater response", result));
+                        Toast.makeText(this, "Response copied", Toast.LENGTH_SHORT).show();
+                    })
+                    .setPositiveButton("Close", null)
+                    .show());
+        }, "PocketProxy-Repeater").start();
+    }
+
+    private void openDecoder() {
+        String[] operations = {
+                "Base64 decode", "Base64 encode",
+                "URL decode", "URL encode",
+                "Hex decode", "Hex encode"
+        };
+        new AlertDialog.Builder(this)
+                .setTitle("Choose decoder")
+                .setItems(operations, (dialog, which) -> openDecoderForm(operations[which]))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void openDecoderForm(String operation) {
+        ScrollView scroll = new ScrollView(this);
+        LinearLayout form = column();
+        form.setPadding(dp(20), dp(10), dp(20), dp(4));
+        scroll.addView(form);
+        EditText input = field("Text to transform", "");
+        input.setMinLines(4);
+        form.addView(input);
+        space(form, 8);
+        TextView output = text("Result appears here", 13, FG, false);
+        output.setTypeface(Typeface.MONOSPACE, Typeface.NORMAL);
+        output.setPadding(dp(12), dp(10), dp(12), dp(10));
+        output.setBackground(rounded(PANEL, 10, 0));
+        form.addView(output);
+
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(operation)
+                .setView(scroll)
+                .setNegativeButton("Close", null)
+                .setNeutralButton("Copy", null)
+                .setPositiveButton("Transform", null)
+                .create();
+        dialog.setOnShowListener(d -> {
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v ->
+                    output.setText(transform(operation, input.getText().toString())));
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(v -> {
+                String value = output.getText().toString();
+                if ("Result appears here".equals(value)) return;
+                ClipboardManager manager = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                manager.setPrimaryClip(ClipData.newPlainText(operation, value));
+                Toast.makeText(this, "Result copied", Toast.LENGTH_SHORT).show();
+            });
+        });
+        dialog.show();
+    }
+
+    private String transform(String operation, String input) {
+        try {
+            if ("Base64 decode".equals(operation)) {
+                return new String(Base64.decode(input.trim(), Base64.DEFAULT), StandardCharsets.UTF_8);
+            }
+            if ("Base64 encode".equals(operation)) {
+                return Base64.encodeToString(input.getBytes(StandardCharsets.UTF_8), Base64.NO_WRAP);
+            }
+            if ("URL decode".equals(operation)) {
+                return java.net.URLDecoder.decode(input, "UTF-8");
+            }
+            if ("URL encode".equals(operation)) {
+                return java.net.URLEncoder.encode(input, "UTF-8");
+            }
+            if ("Hex decode".equals(operation)) {
+                String hex = input.replaceAll("\\s+", "").replaceFirst("^0x", "");
+                if (hex.length() % 2 != 0) throw new IllegalArgumentException("Hex length must be even");
+                byte[] bytes = new byte[hex.length() / 2];
+                for (int i = 0; i < bytes.length; i++) {
+                    int high = Character.digit(hex.charAt(i * 2), 16);
+                    int low = Character.digit(hex.charAt(i * 2 + 1), 16);
+                    if (high < 0 || low < 0) throw new IllegalArgumentException("Invalid hexadecimal character");
+                    bytes[i] = (byte) ((high << 4) + low);
+                }
+                return new String(bytes, StandardCharsets.UTF_8);
+            }
+            if ("Hex encode".equals(operation)) {
+                byte[] bytes = input.getBytes(StandardCharsets.UTF_8);
+                StringBuilder hex = new StringBuilder(bytes.length * 2);
+                char[] digits = "0123456789abcdef".toCharArray();
+                for (byte value : bytes) {
+                    int unsigned = value & 0xff;
+                    hex.append(digits[unsigned >>> 4]).append(digits[unsigned & 0xf]);
+                }
+                return hex.toString();
+            }
+            return "Unsupported operation";
+        } catch (Exception e) {
+            return "Transform failed: " + e.getClass().getSimpleName() + ": " + e.getMessage();
         }
     }
 

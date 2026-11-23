@@ -148,6 +148,7 @@ public final class ProxyService extends Service {
                 int port = uri.getPort() > 0 ? uri.getPort() : 80;
                 entry = new TrafficStore.Entry(method, uri.toString(), host);
                 entry.requestHeaders = TrafficStore.sanitizeHeaders(headers);
+                entry.rawRequestHeaders = joinHeaders(headers);
                 TrafficStore.add(entry);
                 if ("pocketproxy.test".equalsIgnoreCase(host)) {
                     localSelfTest(output, entry);
@@ -176,6 +177,14 @@ public final class ProxyService extends Service {
             throw new IOException("Missing absolute URI or Host header");
         }
         return new URI("http://" + hostHeader + target);
+    }
+
+    private static String joinHeaders(List<String> headers) {
+        StringBuilder raw = new StringBuilder();
+        for (String header : headers) {
+            raw.append(header).append('\n');
+        }
+        return raw.toString();
     }
 
     private void localSelfTest(OutputStream output, TrafficStore.Entry entry) throws IOException {

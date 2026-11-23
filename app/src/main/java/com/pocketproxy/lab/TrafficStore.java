@@ -29,6 +29,7 @@ public final class TrafficStore {
         public final String host;
         public volatile String status = "…";
         public volatile String requestHeaders = "";
+        public volatile String rawRequestHeaders = "";
         public volatile String responseHeaders = "";
         public volatile String requestBody = "";
         public volatile String responseBody = "";
@@ -48,9 +49,15 @@ public final class TrafficStore {
             return "#" + id + "  " + timeLabel() + "\n" + method + " " + url + "\n"
                     + "Host: " + host + "\nStatus: " + status + "\nDuration: " + durationMs + " ms"
                     + "\n\nREQUEST HEADERS (sensitive values redacted)\n" + requestHeaders
-                    + (requestBody.isEmpty() ? "" : "\nREQUEST BODY PREVIEW (may contain secrets)\n" + requestBody)
+                    + "\n\nREQUEST BODY"
+                    + (requestBody.isEmpty()
+                        ? "\n[No body captured — enable 'Capture HTTP body previews' before sending the request]"
+                        : "\n" + requestBody)
                     + "\n\nRESPONSE HEADERS (sensitive values redacted)\n" + responseHeaders
-                    + (responseBody.isEmpty() ? "" : "\nRESPONSE BODY PREVIEW (may contain secrets)\n" + responseBody);
+                    + "\n\nRESPONSE BODY"
+                    + (responseBody.isEmpty()
+                        ? "\n[No response body captured]"
+                        : "\n" + responseBody);
         }
     }
 

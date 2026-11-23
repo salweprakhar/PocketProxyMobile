@@ -8,6 +8,11 @@ A **local-only, Burp-style educational HTTP proxy** for Android phones. It is an
 - HTTP forwarding, including GET/POST and request bodies (Content-Length and chunked transfer).
 - HTTPS **CONNECT tunnels**, preserving encryption: records destination host only, **never decrypts HTTPS content**.
 - Searchable, tappable traffic history; request/response headers; HTTP response codes and durations.
+- Plain HTTP Request Repeater with editable method, URL, headers and body.
+- Captured HTTP request and response body previews in traffic details.
+- Built-in Base64, URL and hex decode/encode tools.
+- Target scope filtering with in-memory host allowlists.
+- Intruder-style plain HTTP payload runner, capped at 20 requests.
 - Automatically masks common authentication, cookie, and key **header values** in history, and common secrets in URL query parameters.
 - Optional HTTP body-preview capture (OFF by default; this can expose secrets and should only be used for safe test traffic).
 - A built-in **offline self-test** using `http://pocketproxy.test/` (handled inside the proxy; no DNS/network access required).
